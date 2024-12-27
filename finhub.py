@@ -4,6 +4,7 @@ from tqdm import tqdm
 import yfinance as yf
 import pandas as pd
 import numpy as np
+import time
 
 def get_splits(ticker, start_date, end_date):
     """
@@ -44,18 +45,12 @@ def calculate_cumulative_relative_return(ticker, benchmark_ticker, start_date, y
     # Download data from Yahoo Finance
     stock_data = yf.download(ticker, start=start_date, end=end_date, progress=False)
     benchmark_data = yf.download(benchmark_ticker, start=start_date, end=end_date, progress=False)
-    print(benchmark_data)
-    print(stock_data)
 
     # Ensure data is not empty
     if stock_data.empty or benchmark_data.empty:
         raise ValueError("No data found for the given ticker(s) and date range.")
 
     # Calculate cumulative returns
-    print(stock_data['Close'].iloc[-1].to_numpy()[0])
-    print(stock_data['Open'].iloc[0].to_numpy()[0])
-    print(benchmark_data['Close'].iloc[-1].to_numpy()[0])
-    print(benchmark_data['Open'].iloc[0].to_numpy()[0])
     stock_cumulative_return = (stock_data['Close'].iloc[-1].to_numpy()[0] / stock_data['Open'].iloc[0].to_numpy()[0]) - 1
     benchmark_cumulative_return = (benchmark_data['Close'].iloc[-1].to_numpy()[0] / benchmark_data['Open'].iloc[0].to_numpy()[0]) - 1
 
@@ -104,84 +99,77 @@ def get_ticker_x_values(ticker_list, metrics_list, start_date='1993-03-01', end_
 
     return date_dict
 
+def get_common_keys(data_dict):
+    # Initialize the set with keys from the first date
+    all_dates = list(data_dict.keys())
+    common_keys = set(data_dict[all_dates[0]].keys())
+
+    # Iterate through the remaining dates and perform intersection
+    for date in all_dates[1:]:
+        common_keys.intersection_update(data_dict[date].keys())
+    return common_keys
 
 # Setup client
 finnhub_client = finnhub.Client(api_key="ctlfnq1r01qv7qq264lgctlfnq1r01qv7qq264m0")
+feature_list = ['assetTurnoverTTM', 'bookValue', 'cashRatio', 'currentRatio',
+       'ebitPerShare', 'eps', 'ev', 'fcfMargin', 'fcfPerShareTTM',
+       'grossMargin', 'inventoryTurnoverTTM', 'longtermDebtTotalAsset',
+       'longtermDebtTotalCapital', 'longtermDebtTotalEquity',
+       'netDebtToTotalCapital', 'netDebtToTotalEquity', 'netMargin',
+       'operatingMargin', 'payoutRatioTTM', 'pb', 'peTTM', 'pfcfTTM',
+       'pretaxMargin', 'psTTM', 'quickRatio', 'receivablesTurnoverTTM',
+       'roaTTM', 'roeTTM', 'roicTTM', 'rotcTTM', 'salesPerShare', 'sgaToSale',
+       'totalDebtToEquity', 'totalDebtToTotalAsset', 'totalDebtToTotalCapital',
+       'totalRatio', 'ptbv', 'tangibleBookValue']
 
+def get_ticker_data(ticker, feature_list):
+    quarterly_data_dict = {}
+    time.sleep(1.0)
+    finhub_dict = finnhub_client.company_basic_financials(ticker, 'all')
+    if(len(finhub_dict['series'])==0):
+        print("No data for {}".format(ticker))
+        return None
+    for metric in feature_list:
+        if(metric in finhub_dict['series']['quarterly']):
+            for entry in finhub_dict['series']['quarterly'][metric]:
+                x_date = (datetime.strptime(entry['period'], "%Y-%m-%d").date() + timedelta(days=1)).strftime('%Y-%m-%d')
+                if x_date not in quarterly_data_dict:
+                    quarterly_data_dict[x_date] = {metric: entry['v']}
+                else:
+                    quarterly_data_dict[x_date][metric] = entry['v']
 
+    for date in quarterly_data_dict.keys():
+        for feature in feature_list:
+            if feature not in quarterly_data_dict[date]:
+                quarterly_data_dict[date][feature] = np.nan
+        assert(len(quarterly_data_dict[date]) == len(feature_list))
+    return quarterly_data_dict
 
+def get_all_tickers_data(tickers, feature_list):
+    all_tickers_data = {}
+    for ticker in tqdm(tickers):
+        all_tickers_data[ticker] = get_ticker_data(ticker, feature_list)
+    return all_tickers_data
 
-''''
-in_all = {}
-aapl_quarterly_data_dict = {}
-aapl_finhub_dict = finnhub_client.company_basic_financials('AAPL', 'all')
-for metric in aapl_finhub_dict['series']['quarterly']:
-    entries = []
-    for entry in aapl_finhub_dict['series']['quarterly'][metric]:
-        x_date = (datetime.strptime(entry['period'], "%Y-%m-%d").date() + timedelta(days=1)).strftime('%Y-%m-%d')
-        if(x_date not in aapl_quarterly_data_dict):
-            aapl_quarterly_data_dict[x_date] = {metric: entry['v']}
-        else:
-            aapl_quarterly_data_dict[x_date][metric] = entry['v']
+def get_data_for_closest_past_date(ticker_data_dict, target_date):
+    target_date = datetime.strptime(target_date, '%Y-%m-%d')
+    closest_date = None
+    for date_str in ticker_data_dict.keys():
+        date = datetime.strptime(date_str, '%Y-%m-%d')
+        if date <= target_date:
+            if closest_date is None or date > closest_date:
+                closest_date = date
+    if closest_date is not None:
+        closest_date=closest_date.strftime('%Y-%m-%d')
+    else:
+        closest_date = None
 
-test_df = pd.DataFrame()
-test_dict = {}
-for date in aapl_quarterly_data_dict.keys():
-    for metric in aapl_quarterly_data_dict[date].keys():
-        if(metric not in test_dict):
-            test_df[metric] = aapl_quarterly_data_dict[date][metric]
-        else:
-            test_df[metric].add(aapl_quarterly_data_dict[date][metric], axis='rows')
-        
-test_df.to_excel('test.xlsx')
-print(aapl_qutest_dfarterly_data_dict)
-''''''
+    if closest_date:
+        return ticker_data_dict[closest_date]
+    else:
+        print(f"No data available for or before {target_date}")
+        return None
 
-print(calculate_cumulative_relative_return('AAPL', 'SPY', '1995-01-01', years=1))
-
-sp500_tickers = [
-    'MMM', 'AOS', 'ABT', 'ABBV', 'ACN', 'ADBE', 'AMD', 'AES', 'AFL', 'AGIL',
-    'APD', 'AIRB', 'AKAM', 'ALB', 'ARE', 'ALXN', 'AMAT', 'APTV', 'ADM', 'ANSS',
-    'ANTM', 'AON', 'APA', 'AAPL', 'AMZN', 'AMCR', 'AMD', 'AMP', 'ABC', 'AME',
-    'AMGN', 'APH', 'ADI', 'ANET', 'AON', 'APA', 'AAPL', 'AMZN', 'AMCR', 'AMD',
-    'AMP', 'ABC', 'AME', 'AMGN', 'APH', 'ADI', 'ANET', 'AON', 'APA', 'AAPL',
-    'AMZN', 'AMCR', 'AMD', 'AMP', 'ABC', 'AME', 'AMGN', 'APH', 'ADI', 'ANET',
-    'AON', 'APA', 'AAPL', 'AMZN', 'AMCR', 'AMD', 'AMP', 'ABC', 'AME', 'AMGN',
-    'APH', 'ADI', 'ANET', 'AON', 'APA', 'AAPL', 'AMZN', 'AMCR', 'AMD', 'AMP',
-    'ABC', 'AME', 'AMGN', 'APH', 'ADI', 'ANET', 'AON', 'APA', 'AAPL', 'AMZN',
-    'AMCR', 'AMD', 'AMP', 'ABC', 'AME', 'AMGN', 'APH', 'ADI', 'ANET', 'AON',
-    'APA', 'AAPL', 'AMZN', 'AMCR', 'AMD', 'AMP', 'ABC', 'AME', 'AMGN', 'APH',
-    'ADI', 'ANET', 'AON', 'APA', 'AAPL', 'AMZN', 'AMCR', 'AMD', 'AMP', 'ABC',
-    'AME', 'AMGN', 'APH', 'ADI', 'ANET', 'AON', 'APA', 'AAPL', 'AMZN', 'AMCR',
-    'AMD', 'AMP', 'ABC', 'AME', 'AMGN', 'APH', 'ADI', 'ANET', 'AON', 'APA',
-    'AAPL', 'AMZN', 'AMCR', 'AMD', 'AMP', 'ABC', 'AME', 'AMGN', 'APH', 'ADI',
-    'ANET', 'AON', 'APA', 'AAPL', 'AMZN', 'AMCR', 'AMD', 'AMP', 'ABC', 'AME',
-    'AMGN', 'APH', 'ADI', 'ANET', 'AON', 'APA', 'AAPL', 'AMZN', 'AMCR', 'AMD',
-    'AMP', 'ABC', 'AME', 'AMGN', 'APH', 'ADI', 'ANET', 'AON', 'APA', 'AAPL',
-    'AMZN', 'AMCR', 'AMD', 'AMP', 'ABC', 'AME', 'AMGN', 'APH', 'ADI', 'ANET',
-    'AON', 'APA', 'AAPL', 'AMZN', 'AMCR', 'AMD', 'AMP', 'ABC', 'AME', 'AMGN',
-    'APH', 'ADI', 'ANET', 'AON', 'APA', 'AAPL', 'AMZN', 'AMCR', 'AMD', 'AMP',
-    'ABC', 'AME', 'AMGN', 'APH', 'ADI', 'ANET', 'AON', 'APA', 'AAPL', 'AMZN',
-    'AMCR', 'AMD', 'AMP', 'ABC', 'AME', 'AMGN', 'APH', 'ADI', 'ANET', 'AON',
-    'APA', 'AAPL', 'AMZN', 'AMCR', 'AMD', 'AMP', 'ABC', 'AME', 'AMGN', 'APH',
-    'ADI', 'ANET', 'AON', 'APA', 'AAPL', 'AMZN', 'AMCR', 'AMD', 'AMP', 'ABC',
-    'AME', 'AMGN', 'APH', 'ADI', 'ANET', 'AON', 'APA', 'AAPL', 'AMZN', 'AMCR',
-    'AMD', 'AMP', 'ABC', 'AME', 'AMGN', 'APH', 'ADI', 'ANET', 'AON', 'APA',
-    'AAPL', 'AMZN', 'AMCR', 'AMD', 'AMP', 'ABC', 'AME', 'AMGN', 'APH', 'ADI',
-    'ANET', 'AON', 'APA', 'AAPL', 'AMZN', 'AMCR', 'AMD', 'AMP', 'ABC', 'AME',
-    'AMGN', 'APH', 'ADI', 'ANET', 'AON', 'APA', 'AAPL', 'AMZN', 'AMCR', 'AMD',
-    'AMP', 'ABC', 'AME', 'AMGN', 'APH', 'ADI', 'ANET', 'AON', 'APA', 'AAPL',
-    'AMZN', 'AMCR', 'AMD', 'AMP', 'ABC', 'AME', 'AMGN', 'APH', 'ADI', 'ANET',
-    'AON', 'APA', 'AAPL', 'AMZN', 'AMCR', 'AMD', 'AMP', 'ABC', 'AME', 'AMGN',
-    'APH', 'ADI', 'ANET', 'AON', 'APA', 'AAPL', 'AMZN', 'AMCR', 'AMD', 'AMP',
-    'ABC', 'AME', 'AMGN', 'APH', 'ADI', 'ANET', 'AON', 'APA', 'AAPL', 'AMZN',
-    'AMCR', 'AMD', 'AMP', 'ABC', 'AME', 'AMGN', 'APH', 'ADI', 'ANET', 'AON',
-    'APA', 'AAPL', 'AMZN', 'AMCR', 'AMD', 'AMP', 'ABC', 'AME', 'AMGN', 'APH',
-    'ADI', 'ANET', 'AON', 'APA', 'AAPL', 'AMZN', 'AMCR', 'AMD', 'AMP', 'ABC',
-    'AME', 'AMGN', 'APH', 'ADI', 'ANET', 'AON', 'APA', 'AAPL', 'AMZN', 'AMCR',
-    'AMD', 'AMP', 'ABC', 'AME', 'AMGN', 'APH', 'ADI', 'ANET', 'AON', 'APA',
-    'AAPL', 'AMZN', 'AMCR', 'AMD', 'AMP', 'ABC', 'AME', 'AMGN', 'APH', 'ADI',
-    'ANET', 'AON', 'APA', 'AAPL', 'AMZN', 'AMCR', 'AMD', 'AMP', 'ABC', 'AME',
-    'AMGN'
-    ]
-'''
+all_tickers_data = get_all_tickers_data(["AAPL", "AMZN", "MMM", "GOOGL", "XOM"], feature_list)
+data = get_data_for_closest_past_date(all_tickers_data["AAPL"], '2024-12-27')
+print(data)
