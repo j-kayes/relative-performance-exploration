@@ -1,10 +1,37 @@
 import finnhub
 from datetime import datetime, timedelta
+from dateutil.relativedelta import relativedelta
 from tqdm import tqdm
 import yfinance as yf
 import pandas as pd
 import numpy as np
 import time
+
+from sp500_tickers import *
+
+def get_dates_list(start_date, end_date, months=3):
+    """
+    Generate a list of dates between `start_date` and `end_date` spaced by `n` months.
+
+    Parameters:
+        start_date (str): The start date in 'YYYY-MM-DD' format.
+        end_date (str): The end date in 'YYYY-MM-DD' format.
+        months (int): Number of months to space between dates.
+
+    Returns:
+        list: A list of date strings in 'YYYY-MM-DD' format.
+    """
+    start_date = datetime.strptime(start_date, '%Y-%m-%d')
+    end_date = datetime.strptime(end_date, '%Y-%m-%d')
+
+    dates = []
+    current_date = start_date
+
+    while current_date <= end_date:
+        dates.append(current_date.strftime('%Y-%m-%d'))
+        current_date += relativedelta(months=months)
+
+    return dates
 
 def get_splits(ticker, start_date, end_date):
     """
@@ -23,10 +50,10 @@ def get_splits(ticker, start_date, end_date):
     splits = splits[(splits.index >= start_date) & (splits.index <= end_date)]
     return splits
 
-def calculate_cumulative_relative_return(ticker, benchmark_ticker, start_date, years=1):
+def calculate_cumulative_relative_return(ticker, start_date, benchmark_ticker="SPY", years=1):
     """
     Calculate the cumulative return of a stock relative to a benchmark index over a period of time after a given start date,
-    accounting for stock splits.
+    (accounting for stock splits?).
 
     Parameters:
         ticker (str): The stock ticker symbol.
@@ -75,26 +102,6 @@ def initialise_stock_dict(ticker_list, metrics_list, start_date='1993-03-01', en
                 date_str = current_date.strftime('%Y-%m-%d')
                 if(date_str in date_str[ticker]):
                     date_dict[ticker][current_date.strftime('%Y-%m-%d')].append() 
-                current_date += timedelta(days=1)
-
-    return date_dict
-
-def get_ticker_x_values(ticker_list, metrics_list, start_date='1993-03-01', end_date='2024-12-24'):
-    ticker_date_x_dict = {}
-    for ticker in tqdm(ticker_list):
-        ticker_date_x_dict[ticker] = {}
-        for metric in metrics_list:
-            ticker_date_x_dict[ticker][metric] = {}
-            if isinstance(start_date, str):
-                start_date = datetime.strptime(start_date, '%Y-%m-%d')
-            if isinstance(end_date, str):
-                end_date = datetime.strptime(end_date, '%Y-%m-%d')
-            # Create a dictionary with each date as a key
-            current_date = start_date
-            while current_date <= end_date:
-                date_str = current_date.strftime('%Y-%m-%d')
-                if(date_str in date_str[ticker]):
-                    ticker_date_x_dict[ticker][current_date.strftime('%Y-%m-%d')].append() 
                 current_date += timedelta(days=1)
 
     return date_dict
@@ -151,25 +158,46 @@ def get_all_tickers_data(tickers, feature_list):
         all_tickers_data[ticker] = get_ticker_data(ticker, feature_list)
     return all_tickers_data
 
-def get_data_for_closest_past_date(ticker_data_dict, target_date):
-    target_date = datetime.strptime(target_date, '%Y-%m-%d')
-    closest_date = None
-    for date_str in ticker_data_dict.keys():
-        date = datetime.strptime(date_str, '%Y-%m-%d')
-        if date <= target_date:
-            if closest_date is None or date > closest_date:
-                closest_date = date
-    if closest_date is not None:
-        closest_date=closest_date.strftime('%Y-%m-%d')
-    else:
-        closest_date = None
+def get_xy_data_for_tickers(ticker_data_dict, start_date='1993-01-29', end_date='2023-12-27'):
+    x_data = []
+    y_data = []
+    quarter_dates_list = get_dates_list(start_date, end_date)
+    for quarter_start_date in tqdm(quarter_dates_list):
+        quarter_start_date = datetime.strptime(quarter_start_date, '%Y-%m-%d')
+        for ticker in ticker_data_dict.keys():
+            closest_date = None
+            for date_str in ticker_data_dict[ticker].keys():
+                date = datetime.strptime(date_str, '%Y-%m-%d')
+                # Closest date on or before the start date:
+                if date <= quarter_start_date:
+                    if closest_date is None or date > closest_date:
+                        closest_date = date
+            if closest_date is not None:
+                closest_date=closest_date.strftime('%Y-%m-%d')
+            else:
+                closest_date = None
+            if closest_date:
+                for retry_n in range(2):
+                    x_data.append(list(ticker_data_dict[ticker][closest_date].values()))
+                    try:
+                        y_data.append(calculate_cumulative_relative_return(ticker, closest_date))
+                    except ValueError:
+                        print(f"No data available for {ticker} from yfinance, retry_n={retry_n}")
+                        if(len(x_data)!=len(y_data)):
+                            x_data.pop()
+                            assert(len(x_data)==len(y_data))
+            else:
+                #print(f"No data available for {ticker} on or before {quarter_start_date}")
+                continue
+    assert(len(x_data) == len(y_data))
+    return np.array(x_data), np.array(y_data)
 
-    if closest_date:
-        return ticker_data_dict[closest_date]
-    else:
-        print(f"No data available for or before {target_date}")
-        return None
+all_tickers_data = get_all_tickers_data(sp500_list, feature_list)
+x_data, y_data = get_xy_data_for_tickers(all_tickers_data)
 
-all_tickers_data = get_all_tickers_data(["AAPL", "AMZN", "MMM", "GOOGL", "XOM"], feature_list)
-data = get_data_for_closest_past_date(all_tickers_data["AAPL"], '2024-12-27')
-print(data)
+#x_data=np.load("x_data.npy")
+#y_data=np.load("y_data.npy")
+np.save("x_data.npy", x_data)
+np.save("y_data.npy", x_data)
+print(x_data.shape)
+print(y_data.shape)
