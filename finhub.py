@@ -1,4 +1,5 @@
 import finnhub
+import requests
 from datetime import datetime, timedelta
 from dateutil.relativedelta import relativedelta
 from tqdm import tqdm
@@ -6,8 +7,35 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 import time
+import logging
 
 from sp500_tickers import *
+
+def calculate_returns(tickers, spread=0.00, benchmark_ticker='SPY', start_date='2020-01-01', end_date='2021-01-01'):
+    # Download data for the specified tickers and date range
+    tickers.append("SPY")  # Add the benchmark ticker to the list
+    data = yf.download(tickers, start=start_date, end=end_date, group_by='ticker')
+    returns = {}
+    for ticker in tickers:
+        try:
+            # Get the open price at the start date and close price at the end date
+            open_price = data[ticker]['Open'].iloc[0] * (1 + spread)
+            close_price = data[ticker]['Close'].iloc[-1] * (1 - spread)
+
+            # Calculate the return
+            if(ticker is not benchmark_ticker):
+                returns[ticker] = (close_price / open_price) - 1
+            else:
+                benchmark_return = (close_price / open_price) - 1
+        except IndexError:
+            print(f"No data available for {ticker} in the specified date range.")
+            returns[ticker] = None
+
+    # Calculate the average return assuming equal share between all stocks/tickers
+    valid_returns = [ret for ret in returns.values() if ret is not None]
+    average_return = sum(valid_returns) / len(valid_returns) if valid_returns else None
+
+    return benchmark_return, returns, average_return
 
 def get_dates_list(start_date, end_date, months=3):
     """
@@ -33,23 +61,6 @@ def get_dates_list(start_date, end_date, months=3):
 
     return dates
 
-def get_splits(ticker, start_date, end_date):
-    """
-    Retrieve stock splits for a given stock and date range.
-
-    Parameters:
-        ticker (str): The stock ticker symbol.
-        start_date (str): The start date in 'YYYY-MM-DD' format.
-        end_date (str): The end date in 'YYYY-MM-DD' format.
-
-    Returns:
-        DataFrame: A DataFrame containing the splits data indexed by date.
-    """
-    stock_data = yf.Ticker(ticker)
-    splits = stock_data.splits
-    splits = splits[(splits.index >= start_date) & (splits.index <= end_date)]
-    return splits
-
 def calculate_cumulative_relative_return(ticker, start_date, benchmark_ticker="SPY", years=1):
     """
     Calculate the cumulative return of a stock relative to a benchmark index over a period of time after a given start date,
@@ -70,8 +81,8 @@ def calculate_cumulative_relative_return(ticker, start_date, benchmark_ticker="S
     end_date = end_date_obj.strftime('%Y-%m-%d')
 
     # Download data from Yahoo Finance
-    stock_data = yf.download(ticker, start=start_date, end=end_date, progress=False)
-    benchmark_data = yf.download(benchmark_ticker, start=start_date, end=end_date, progress=False)
+    stock_data = yf.download(ticker, start=start_date, end=end_date, progress=False, threads=True)
+    benchmark_data = yf.download(benchmark_ticker, start=start_date, end=end_date, progress=False, threads=True)
 
     # Ensure data is not empty
     if stock_data.empty or benchmark_data.empty:
@@ -158,46 +169,65 @@ def get_all_tickers_data(tickers, feature_list):
         all_tickers_data[ticker] = get_ticker_data(ticker, feature_list)
     return all_tickers_data
 
-def get_xy_data_for_tickers(ticker_data_dict, start_date='1993-01-29', end_date='2023-12-27'):
+def check_yfinance_connection():
+    try:
+        response = requests.get("https://finance.yahoo.com", timeout=5)
+        return response.status_code == 200
+    except requests.RequestException:
+        return False
+
+def get_xy_data_for_tickers(ticker_data_dict, quarter_start_date='1993-03-01', end_date='2018-01-01', max_retries=1, retry_delay=1):
     x_data = []
     y_data = []
-    quarter_dates_list = get_dates_list(start_date, end_date)
-    for quarter_start_date in tqdm(quarter_dates_list):
-        quarter_start_date = datetime.strptime(quarter_start_date, '%Y-%m-%d')
+    dates_list=get_dates_list(quarter_start_date, end_date, months=3)
+    for quarter_date in tqdm(dates_list):
+        quarter_date = datetime.strptime(quarter_date, '%Y-%m-%d')
         for ticker in ticker_data_dict.keys():
             closest_date = None
             for date_str in ticker_data_dict[ticker].keys():
                 date = datetime.strptime(date_str, '%Y-%m-%d')
                 # Closest date on or before the start date:
-                if date <= quarter_start_date:
+                if date <= quarter_date:
                     if closest_date is None or date > closest_date:
                         closest_date = date
             if closest_date is not None:
-                closest_date=closest_date.strftime('%Y-%m-%d')
+                closest_date = closest_date.strftime('%Y-%m-%d')
             else:
                 closest_date = None
             if closest_date:
-                for retry_n in range(2):
-                    x_data.append(list(ticker_data_dict[ticker][closest_date].values()))
-                    try:
-                        y_data.append(calculate_cumulative_relative_return(ticker, closest_date))
-                    except ValueError:
-                        print(f"No data available for {ticker} from yfinance, retry_n={retry_n}")
-                        if(len(x_data)!=len(y_data)):
-                            x_data.pop()
-                            assert(len(x_data)==len(y_data))
+                for retry_n in range(max_retries):
+                    if(check_yfinance_connection()):
+                        try:
+                            x_data.append(list(ticker_data_dict[ticker][closest_date].values()))
+                            y_data.append(calculate_cumulative_relative_return(ticker, closest_date))
+                            break  # Exit the retry loop if successful
+                        except ValueError:
+                            print(f"No data available for {ticker} from yfinance, retry_n={retry_n}")
+                            if(len(x_data) != len(y_data)):
+                                x_data.pop()
+                                assert(len(x_data) == len(y_data))
+                            if(retry_n < max_retries - 1):
+                                print(f"Retrying in {retry_delay} seconds...")
+                                time.sleep(retry_delay)
+                            else:
+                                print(f"Failed to get data for {ticker} after {max_retries} retries.")
+                    else:
+                        print("No connection to yfinance. Waiting for connection to be restored...")
+                        time.sleep(retry_delay)
             else:
                 #print(f"No data available for {ticker} on or before {quarter_start_date}")
                 continue
-    assert(len(x_data) == len(y_data))
+        assert(len(x_data) == len(y_data))
     return np.array(x_data), np.array(y_data)
 
-all_tickers_data = get_all_tickers_data(sp500_list, feature_list)
+#logging.basicConfig(level=logging.DEBUG)
+all_tickers_data = np.load("sp500.npy", allow_pickle=True).item() #get_all_tickers_data(sp500_list, feature_list)
+np.save("sp500.npy", all_tickers_data, allow_pickle=True)
 x_data, y_data = get_xy_data_for_tickers(all_tickers_data)
 
-#x_data=np.load("x_data.npy")
-#y_data=np.load("y_data.npy")
-np.save("x_data.npy", x_data)
-np.save("y_data.npy", x_data)
 print(x_data.shape)
 print(y_data.shape)
+x_data = np.save("x_data.npy")
+y_data = np.save("y_data.npy")
+
+#print(calculate_returns(["AAPL", "GOOG", "XOM"]))

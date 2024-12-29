@@ -168,5 +168,7 @@ cython_debug/
 #.idea/
 
 # PyPI configuration file
+
 .pypirc
-notes.txt
+*.txt
+*.npy
