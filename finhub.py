@@ -56,46 +56,10 @@ def get_dates_list(start_date, end_date, months=3):
     current_date = start_date
 
     while current_date <= end_date:
-        dates.append(current_date.strftime('%Y-%m-%d'))
+        dates.append(current_date)
         current_date += relativedelta(months=months)
 
     return dates
-
-def calculate_cumulative_relative_return(ticker, start_date, benchmark_ticker="SPY", years=1):
-    """
-    Calculate the cumulative return of a stock relative to a benchmark index over a period of time after a given start date,
-    (accounting for stock splits?).
-
-    Parameters:
-        ticker (str): The stock ticker symbol.
-        benchmark_ticker (str): The benchmark index ticker symbol.
-        start_date (str): The start date in 'YYYY-MM-DD' format.
-        years (int): Number of years after the start date to calculate cumulative relative return.
-
-    Returns:
-        float: The cumulative relative return over the specified period.
-    """
-    # Determine the end date based on the number of years
-    start_date_obj = pd.to_datetime(start_date)
-    end_date_obj = start_date_obj + pd.DateOffset(years=years)
-    end_date = end_date_obj.strftime('%Y-%m-%d')
-
-    # Download data from Yahoo Finance
-    stock_data = yf.download(ticker, start=start_date, end=end_date, progress=False, threads=True)
-    benchmark_data = yf.download(benchmark_ticker, start=start_date, end=end_date, progress=False, threads=True)
-
-    # Ensure data is not empty
-    if stock_data.empty or benchmark_data.empty:
-        raise ValueError("No data found for the given ticker(s) and date range.")
-
-    # Calculate cumulative returns
-    stock_cumulative_return = (stock_data['Close'].iloc[-1].to_numpy()[0] / stock_data['Open'].iloc[0].to_numpy()[0]) - 1
-    benchmark_cumulative_return = (benchmark_data['Close'].iloc[-1].to_numpy()[0] / benchmark_data['Open'].iloc[0].to_numpy()[0]) - 1
-
-    # Calculate cumulative relative return
-    cumulative_relative_return = stock_cumulative_return - benchmark_cumulative_return
-
-    return cumulative_relative_return
 
 def initialise_stock_dict(ticker_list, metrics_list, start_date='1993-03-01', end_date='2024-12-24'):
     date_dict = {}
@@ -176,58 +140,106 @@ def check_yfinance_connection():
     except requests.RequestException:
         return False
 
+def calculate_cumulative_relative_return(tickers, start_date, years, data, benchmark_ticker="SPY"):
+    """
+    Calculate the cumulative return of multiple stocks relative to a benchmark index over a period of time after a given start date.
+
+    Parameters:
+        tickers (list): List of stock ticker symbols.
+        benchmark_ticker (str): The benchmark index ticker symbol.
+        start_date (str): The start date in 'YYYY-MM-DD' format.
+        years (int): Number of years after the start date to calculate cumulative relative return.
+        data (DataFrame): Pre-downloaded data for the tickers and benchmark.
+
+    Returns:
+        dict: A dictionary with the cumulative relative return for each ticker.
+    """
+    end_date = (datetime.strptime(start_date, '%Y-%m-%d') + timedelta(days=365 * years)).strftime('%Y-%m-%d')
+
+    # Ensure data is not empty
+    if data.empty:
+        raise ValueError("No data found for the given ticker(s) and date range.")
+
+    cumulative_relative_returns = {}
+    for ticker in tickers:
+        try:
+            # Calculate cumulative returns
+            stock_cumulative_return = (data[ticker]['Close'].iloc[-1] / data[ticker]['Open'].iloc[0]) - 1
+            benchmark_cumulative_return = (data[benchmark_ticker]['Close'].iloc[-1] / data[benchmark_ticker]['Open'].iloc[0]) - 1
+
+            # Calculate cumulative relative return
+            cumulative_relative_return = stock_cumulative_return - benchmark_cumulative_return
+            cumulative_relative_returns[ticker] = cumulative_relative_return
+        except IndexError:
+            print(f"No data available for {ticker} in the specified date range.")
+            cumulative_relative_returns[ticker] = None
+
+    return cumulative_relative_returns
+
 def get_xy_data_for_tickers(ticker_data_dict, quarter_start_date='1993-03-01', end_date='2018-01-01', max_retries=1, retry_delay=1):
     x_data = []
     y_data = []
-    dates_list=get_dates_list(quarter_start_date, end_date, months=3)
+    dates_list = get_dates_list(quarter_start_date, end_date, months=3)
+    tickers = list(ticker_data_dict.keys())
+    benchmark_ticker = "SPY"
+
     for quarter_date in tqdm(dates_list):
-        quarter_date = datetime.strptime(quarter_date, '%Y-%m-%d')
-        for ticker in ticker_data_dict.keys():
-            closest_date = None
-            for date_str in ticker_data_dict[ticker].keys():
-                date = datetime.strptime(date_str, '%Y-%m-%d')
-                # Closest date on or before the start date:
-                if date <= quarter_date:
-                    if closest_date is None or date > closest_date:
-                        closest_date = date
-            if closest_date is not None:
-                closest_date = closest_date.strftime('%Y-%m-%d')
-            else:
-                closest_date = None
-            if closest_date:
-                for retry_n in range(max_retries):
-                    if(check_yfinance_connection()):
-                        try:
-                            x_data.append(list(ticker_data_dict[ticker][closest_date].values()))
-                            y_data.append(calculate_cumulative_relative_return(ticker, closest_date))
-                            break  # Exit the retry loop if successful
-                        except ValueError:
-                            print(f"No data available for {ticker} from yfinance, retry_n={retry_n}")
-                            if(len(x_data) != len(y_data)):
-                                x_data.pop()
-                                assert(len(x_data) == len(y_data))
-                            if(retry_n < max_retries - 1):
-                                print(f"Retrying in {retry_delay} seconds...")
-                                time.sleep(retry_delay)
-                            else:
-                                print(f"Failed to get data for {ticker} after {max_retries} retries.")
-                    else:
-                        print("No connection to yfinance. Waiting for connection to be restored...")
+        quarter_date_str = quarter_date.strftime('%Y-%m-%d')
+        end_date_str = (quarter_date + timedelta(days=365)).strftime('%Y-%m-%d')
+
+        for retry_n in range(max_retries):
+            if check_yfinance_connection():
+                try:
+                    # Download data for all tickers at once
+                    data = yf.download(tickers + [benchmark_ticker], start=quarter_date_str, end=end_date_str, group_by='ticker')
+                    for ticker in tickers:
+                        closest_date = None
+                        for date_str in ticker_data_dict[ticker].keys():
+                            date = datetime.strptime(date_str, '%Y-%m-%d')
+                            # Closest date on or before the start date:
+                            if date <= quarter_date:
+                                if closest_date is None or date > closest_date:
+                                    closest_date = date
+                        if closest_date is not None:
+                            closest_date_str = closest_date.strftime('%Y-%m-%d')
+                            if closest_date_str in ticker_data_dict[ticker]:
+                                x_data.append(list(ticker_data_dict[ticker][closest_date_str].values()))
+                                cumulative_relative_returns = calculate_cumulative_relative_return([ticker], closest_date_str, 1, data, benchmark_ticker)
+                                y_data.append(cumulative_relative_returns[ticker])
+                    break  # Exit the retry loop if successful
+                except ValueError:
+                    print(f"No data available for tickers from yfinance, retry_n={retry_n}")
+                    if len(x_data) != len(y_data):
+                        x_data.pop()
+                        assert len(x_data) == len(y_data)
+                    if retry_n < max_retries - 1:
+                        print(f"Retrying in {retry_delay} seconds...")
                         time.sleep(retry_delay)
+                    else:
+                        print(f"Failed to get data for tickers after {max_retries} retries.")
             else:
-                #print(f"No data available for {ticker} on or before {quarter_start_date}")
-                continue
-        assert(len(x_data) == len(y_data))
+                print("No connection to yfinance. Waiting for connection to be restored...")
+                time.sleep(retry_delay)
+
+    assert len(x_data) == len(y_data)
     return np.array(x_data), np.array(y_data)
 
 #logging.basicConfig(level=logging.DEBUG)
 all_tickers_data = np.load("sp500.npy", allow_pickle=True).item() #get_all_tickers_data(sp500_list, feature_list)
 np.save("sp500.npy", all_tickers_data, allow_pickle=True)
-x_data, y_data = get_xy_data_for_tickers(all_tickers_data)
+#x_data, y_data = get_xy_data_for_tickers(all_tickers_data)
 
-print(x_data.shape)
-print(y_data.shape)
-x_data = np.save("x_data.npy")
-y_data = np.save("y_data.npy")
+x_data = np.load("x_data.npy")
+y_data = np.load("y_data.npy")
+
+
+
+print(x_data)
+print(y_data)
+
+#x_data = np.save("x_data.npy", x_data)
+#y_data = np.save("y_data.npy", y_data)
+
+
 
 #print(calculate_returns(["AAPL", "GOOG", "XOM"]))
